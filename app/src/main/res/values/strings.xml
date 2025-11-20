@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">AgentClient</string>
+    <string name="accessibility_service_description">AgentClient需要无障碍权限来执行自动化操作</string>
+</resources>
