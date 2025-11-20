@@ -16,11 +16,14 @@ import com.example.agentclient.accessibility.GestureDispatcher
  * 5. タスクループ（TaskLoop）
  * 6. BAN対策休憩（AntiBanRest）
  * 7. 終了（Exit）
+ * 
+ * 変更点：
+ * - SimpleStateMachine を使用して状態管理を行うように変更
  */
 abstract class GameScriptTemplate(
     humanizedAction: HumanizedAction,
     logger: Logger, protected val gestureDispatcher: GestureDispatcher
-) : BaseScript(humanizedAction, logger) {
+) : BaseScript(humanizedAction, logger), SimpleStateMachine.StateHandler<GameScriptTemplate.GameState> {
 
     /**
      * ゲーム状態を定義するEnum
@@ -35,10 +38,10 @@ abstract class GameScriptTemplate(
         EXIT            // 終了
     }
 
-    // 現在の状態
-    protected var currentState: GameState = GameState.INIT
+    // 状態マシン
+    private lateinit var fsm: SimpleStateMachine<GameState>
 
-    // 状態ごとのリトライカウンタ
+    // 状態ごとのリトライカウンタ（互換性のため維持）
     private val retryCounters = mutableMapOf<GameState, Int>()
 
     // 状態ごとの最大リトライ回数
@@ -53,20 +56,39 @@ abstract class GameScriptTemplate(
      */
     override suspend fun onStart() {
         logger.info(getScriptName(), "ゲームスクリプト開始")
-        currentState = GameState.INIT
         retryCounters.clear()
+        
+        // 状態マシンを初期化
+        fsm = SimpleStateMachine(
+            logger = logger,
+            scriptName = getScriptName(),
+            initialState = GameState.INIT,
+            maxStateDurationMs = 300000, // 5分（安全装置）
+            maxStateRetry = 100,         // 内部リトライは多めに設定し、ロジック側で制御
+            handler = this
+        )
     }
 
     /**
      * 各ステップで実行される処理
-     * 状態マシンのメインループ
+     * 状態マシンの tick を呼び出す
      */
     override suspend fun onStep() {
+        // 状態マシンを進行させる
+        if (::fsm.isInitialized) {
+            fsm.tick()
+        }
+    }
+
+    /**
+     * 状態マシンのハンドラ実装
+     */
+    override suspend fun handleState(state: GameState, fsm: SimpleStateMachine<GameState>) {
         // 擬人化された待機時間を挿入
         humanizedAction.waitRandomStep()
 
-       // 現在の状態に応じた処理を実行
-        val nextState = when (currentState) {
+        // 現在の状態に応じた処理を実行
+        val nextState = when (state) {
             GameState.INIT -> handleInit()
             GameState.LAUNCH_GAME -> handleLaunchGame()
             GameState.CHECK_LOGIN -> handleCheckLogin()
@@ -75,32 +97,35 @@ abstract class GameScriptTemplate(
             GameState.ANTI_BAN_REST -> handleAntiBanRest()
             GameState.EXIT -> {
                 markFinished()
-                null
+                GameState.EXIT
             }
         }
 
-        // 状態遷移
-        nextState?.let { transitionTo(it) }
+        // 状態遷移が必要な場合
+        if (nextState != state) {
+            transitionTo(nextState)
+            fsm.moveTo(nextState)
+        }
     }
 
     /**
      * スクリプト終了時の処理
      */
     override suspend fun onStop() {
-        logger.info(getScriptName(), "ゲームスクリプト終了: 最終状態=${currentState}")
+        val finalState = if (::fsm.isInitialized) fsm.getCurrentState() else "UNKNOWN"
+        logger.info(getScriptName(), "ゲームスクリプト終了: 最終状態=$finalState")
     }
 
     /**
      * 現在の内部状態を返す（HeartbeatService用）
      */
-    override fun getCurrentState(): String = currentState.name
+    override fun getCurrentState(): String = if (::fsm.isInitialized) fsm.getCurrentState().name else "INIT"
 
     /**
-     * 状態遷移を実行
+     * 状態遷移ログ出力とリトライカウンタリセット
      */
     private fun transitionTo(newState: GameState) {
-        logger.info(getScriptName(), "状態遷移: ${currentState} -> ${newState}")
-        currentState = newState
+        // logger.info(getScriptName(), "状態遷移: ... -> ${newState}") // FSM側でもログが出るので抑制してもよい
         retryCounters[newState] = 0
     }
 

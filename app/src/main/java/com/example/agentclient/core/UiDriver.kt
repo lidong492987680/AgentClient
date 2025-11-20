@@ -4,6 +4,7 @@ import android.content.Context
 import com.example.agentclient.accessibility.AgentAccessibilityService
 import com.example.agentclient.accessibility.NodeFinder
 import com.example.agentclient.scripts.behavior.HumanizedAction
+import com.example.agentclient.scripts.behavior.BehaviorProfile
 import com.example.agentclient.scripts.engine.ScriptEngine
 import com.example.agentclient.scripts.engine.TestScript
 
@@ -26,7 +27,7 @@ class UiDriver private constructor(private val context: Context) {
     // NodeFinderインスタンス（UI検出用）
     private val nodeFinder: NodeFinder by lazy {
         NodeFinder(logger) {
-            AgentAccessibilityService.getInstance()  // 注意这里应该调用 getInstance() 方法
+            AgentAccessibilityService.getInstance()
         }
     }
     
@@ -170,6 +171,75 @@ class UiDriver private constructor(private val context: Context) {
     }
     
     // ========== UI状態検出のビジネスセマンティクス関数 ==========
+
+    /**
+     * ノード検索条件
+     * 画面上の要素を特定するための条件を定義
+     */
+    sealed class NodeCondition {
+        data class Text(val text: String, val exactMatch: Boolean = false) : NodeCondition()
+        data class Id(val id: String) : NodeCondition()
+    }
+
+    /**
+     * 汎用ノード検索（サスペンド関数）
+     * 指定された条件に一致するノードを検索する
+     * 
+     * @param condition 検索条件
+     * @param timeoutMs タイムアウト時間（ミリ秒）
+     * @return 見つかったノード。注意：呼び出し側が recycle() する必要があります。
+     */
+    suspend fun findNode(condition: NodeCondition, timeoutMs: Long = 10000): android.view.accessibility.AccessibilityNodeInfo? {
+        val result = when (condition) {
+            is NodeCondition.Text -> nodeFinder.waitForNodeByText(condition.text, condition.exactMatch, timeoutMs)
+            is NodeCondition.Id -> nodeFinder.waitForNodeById(condition.id, timeoutMs)
+        }
+        // NodeFinder は NodeSearchResult を返す。
+        // result.node は呼び出し側（ここ）が所有権を持つ。
+        // ここでは AccessibilityNodeInfo を直接返すが、所有権はさらに呼び出し側に移譲する。
+        return result?.node
+    }
+
+    /**
+     * ノードが表示されるまで待機（サスペンド関数）
+     * findNode のエイリアス（意味合いを明確にするため）
+     */
+    suspend fun waitNodeVisible(condition: NodeCondition, timeoutMs: Long = 10000): android.view.accessibility.AccessibilityNodeInfo? {
+        return findNode(condition, timeoutMs)
+    }
+
+    /**
+     * ノードが表示されたらタップする（サスペンド関数）
+     * 
+     * @param condition 検索条件
+     * @param timeoutMs タイムアウト時間
+     * @return タップ成功なら true
+     */
+    suspend fun tapWhenVisible(condition: NodeCondition, timeoutMs: Long = 10000): Boolean {
+        val node = findNode(condition, timeoutMs) ?: return false
+        try {
+            val rect = android.graphics.Rect()
+            node.getBoundsInScreen(rect)
+            val x = rect.centerX().toFloat()
+            val y = rect.centerY().toFloat()
+            
+            logger.info("UiDriver", "ノードを検出、タップを実行: ($x, $y)")
+            
+            val service = AgentAccessibilityService.getInstance()
+            if (service != null) {
+                return service.tapSuspend(x, y)
+            } else {
+                logger.error("UiDriver", "AccessibilityService is null")
+                return false
+            }
+        } catch (e: Exception) {
+            logger.error("UiDriver", "タップ実行中にエラー", e)
+            return false
+        } finally {
+            // ノードは必ず recycle する
+            node.recycle()
+        }
+    }
     
     /**
      * ログイン画面が消えるまで待機

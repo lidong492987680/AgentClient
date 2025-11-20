@@ -1,7 +1,7 @@
 package com.example.agentclient.scripts.behavior
 
 import android.content.Context
-import com.example.agentclient.core.BehaviorProfile
+import com.example.agentclient.scripts.behavior.BehaviorProfile
 import com.example.agentclient.core.Logger
 import kotlinx.coroutines.delay
 import kotlin.random.Random

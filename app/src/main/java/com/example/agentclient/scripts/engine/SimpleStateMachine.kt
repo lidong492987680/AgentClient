@@ -87,7 +87,8 @@ class SimpleStateMachine<StateEnum : Enum<StateEnum>>(
         val now = System.currentTimeMillis()
         val duration = now - stateStartTime.get()
 
-        if (duration > maxStateDurationMs) {
+        // 状態滞在時間のチェック（必要であれば）
+        if (maxStateDurationMs > 0 && duration > maxStateDurationMs) {
             val retry = stateRetryCount.incrementAndGet()
             logger.warn(
                 scriptName,
@@ -101,6 +102,12 @@ class SimpleStateMachine<StateEnum : Enum<StateEnum>>(
                 )
             }
             // リトライ回数の範囲内であれば、状態自体は維持したまま handleState を継続
+            // ただし、stateStartTime はリセットすべきか？
+            // ここではリセットせず、次の tick でもタイムアウト判定になるが、
+            // handleState 内で何らかのアクション（リトライ処理）が行われることを期待する。
+            // あるいは、ここで stateStartTime をリセットして「猶予」を与えるか。
+            // シンプルにするため、リセットする。
+            stateStartTime.set(now)
         }
 
         handler.handleState(currentState, this)
