@@ -9,6 +9,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.time.LocalDate
 
 /**
  * 脚本调度引擎
@@ -19,6 +20,7 @@ import kotlinx.coroutines.launch
  * - 管理脚本执行的协程
  * - 调用脚本的生命周期方法
  * - 提供脚本运行状态查询
+ * - 统计每日运行时长
  */
 object ScriptEngine {
     
@@ -36,6 +38,15 @@ object ScriptEngine {
     
     // 协程作用域
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    
+    // 当日累计运行时长（毫秒）
+    private var dailyRuntimeMs: Long = 0L
+    
+    // 运行时长统计的日期
+    private var runtimeDate: LocalDate? = null
+    
+    // 上次更新运行时长的时间戳
+    private var lastUpdateTime: Long = 0L
     
     /**
      * 初始化 ScriptEngine
@@ -63,8 +74,45 @@ object ScriptEngine {
         
         // 启动协程执行脚本
         scriptJob = scope.launch {
+            val heartbeatService = context?.let { com.example.agentclient.network.HeartbeatService.getInstance(it) }
+            val startTime = System.currentTimeMillis()
+            
+            // 初始化运行时长统计
+            val currentDate = LocalDate.now()
+            if (runtimeDate != currentDate) {
+                // 新的一天，重置计数
+                runtimeDate = currentDate
+                dailyRuntimeMs = 0L
+            }
+            lastUpdateTime = System.currentTimeMillis()
+            
             try {
                 log.info("ScriptEngine", "Starting script: ${script.getScriptName()}")
+                
+                // 设置错误回调
+                script.onError = { error ->
+                    heartbeatService?.reportError("SCRIPT_ERROR", error.message)
+                    heartbeatService?.updateScriptStatus(
+                        com.example.agentclient.network.HeartbeatService.ScriptStatus(
+                            key = script.getScriptName(),
+                            status = "error",
+                            startTime = startTime,
+                            currentState = script.getCurrentState(),
+                            dailyRuntimeMin = (dailyRuntimeMs / 60000).toInt()
+                        )
+                    )
+                }
+                
+                // 初始状态上报
+                heartbeatService?.updateScriptStatus(
+                    com.example.agentclient.network.HeartbeatService.ScriptStatus(
+                        key = script.getScriptName(),
+                        status = "running",
+                        startTime = startTime,
+                        currentState = script.getCurrentState(),
+                        dailyRuntimeMin = (dailyRuntimeMs / 60000).toInt()
+                    )
+                )
                 
                 // 调用脚本的 onStart
                 script.onStart()
@@ -73,6 +121,33 @@ object ScriptEngine {
                 while (isActive && !script.isFinished()) {
                     script.runStepSafely()
                     delay(script.stepIntervalMs)
+                    
+                    // 更新运行时长统计
+                    val now = System.currentTimeMillis()
+                    val nowDate = LocalDate.now()
+                    
+                    // 检查是否跨天
+                    if (nowDate != runtimeDate) {
+                        // 跨天了，重置统计
+                        runtimeDate = nowDate
+                        dailyRuntimeMs = 0L
+                        lastUpdateTime = now
+                    } else {
+                        // 累加运行时长
+                        dailyRuntimeMs += (now - lastUpdateTime)
+                        lastUpdateTime = now
+                    }
+                    
+                    // 更新运行状态
+                    heartbeatService?.updateScriptStatus(
+                        com.example.agentclient.network.HeartbeatService.ScriptStatus(
+                            key = script.getScriptName(),
+                            status = "running",
+                            startTime = startTime,
+                            currentState = script.getCurrentState(),
+                            dailyRuntimeMin = (dailyRuntimeMs / 60000).toInt()
+                        )
+                    )
                 }
                 
                 // 调用脚本的 onStop
@@ -81,7 +156,20 @@ object ScriptEngine {
                 log.info("ScriptEngine", "Script finished: ${script.getScriptName()}")
             } catch (e: Exception) {
                 log.error("ScriptEngine", "Error running script", e)
+                heartbeatService?.reportError("SCRIPT_ENGINE_ERROR", e.message)
             } finally {
+                // 最终状态上报
+                heartbeatService?.updateScriptStatus(
+                    com.example.agentclient.network.HeartbeatService.ScriptStatus(
+                        key = script.getScriptName(),
+                        status = "stopped",
+                        lastSuccess = System.currentTimeMillis(),
+                        startTime = startTime,
+                        currentState = script.getCurrentState(),
+                        dailyRuntimeMin = (dailyRuntimeMs / 60000).toInt()
+                    )
+                )
+                
                 // 清理
                 currentScript = null
                 scriptJob = null

@@ -60,6 +60,18 @@ abstract class BaseScript(
     fun isFinished(): Boolean = finished
     
     /**
+     * 获取当前状态描述
+     * 子类可重写此方法提供更详细的状态信息
+     */
+    open fun getCurrentState(): String? = null
+
+    /**
+     * 错误回调
+     * 当脚本执行出错时调用
+     */
+    var onError: ((Throwable) -> Unit)? = null
+
+    /**
      * 安全执行一个步骤
      * 捕获异常，防止脚本崩溃
      * 异常过多时自动标记为完成
@@ -71,6 +83,9 @@ abstract class BaseScript(
         } catch (e: Exception) {
             errorCount++
             logger.error(getScriptName(), "Error in onStep (count: $errorCount)", e)
+            
+            // 调用错误回调
+            onError?.invoke(e)
             
             // 异常过多时停止脚本
             if (errorCount >= maxErrors) {
