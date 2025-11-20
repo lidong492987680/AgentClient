@@ -1,8 +1,6 @@
 package com.example.agentclient.network
 
 import android.content.Context
-import android.os.BatteryManager
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import com.example.agentclient.core.Config
@@ -18,6 +16,12 @@ import java.util.concurrent.atomic.AtomicLong
 /**
  * 心跳服务
  * 负责定期向服务器发送心跳，上报状态并接收命令
+ * 
+ * 职责：
+ * 1. 维护心跳定时任务
+ * 2. 网络通信
+ * 3. 委托 DeviceStatusCollector 收集状态
+ * 4. 委托 CommandProcessor 处理命令
  */
 class HeartbeatService private constructor(private val context: Context) {
 
@@ -29,6 +33,10 @@ class HeartbeatService private constructor(private val context: Context) {
 
     private val handler = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    // 委托对象
+    private val commandProcessor = CommandProcessor(taskQueue, logger)
+    private val deviceStatusCollector = DeviceStatusCollector(context, logger)
 
     // 状态标志
     private val isRunning = AtomicBoolean(false)
@@ -248,16 +256,18 @@ class HeartbeatService private constructor(private val context: Context) {
 
         val interval = calculateHeartbeatInterval()
 
-//        heartbeatRunnable = Runnable {
-//            if (isRunning.get()) {
-//                sendHeartbeat()
-//                scheduleNextHeartbeat()
-//            }
-//        }
-//
-//        handler.postDelayed(heartbeatRunnable!!, interval)
+        heartbeatRunnable = Runnable {
+            if (isRunning.get()) {
+                sendHeartbeat()
+                scheduleNextHeartbeat()
+            }
+        }
 
-//        logger.debug("HeartbeatService", "Next heartbeat scheduled in ${interval}ms")
+        heartbeatRunnable?.let {
+            handler.postDelayed(it, interval)
+        }
+
+        logger.debug("HeartbeatService", "Next heartbeat scheduled in ${interval}ms")
     }
 
     /**
@@ -305,6 +315,9 @@ class HeartbeatService private constructor(private val context: Context) {
 
                 logger.info("HeartbeatService", "Heartbeat sent successfully")
 
+            } catch (e: CancellationException) {
+                // 协程被主动取消，不算失败
+                throw e
             } catch (e: Exception) {
                 handleHeartbeatFailure(e)
             }
@@ -339,20 +352,23 @@ class HeartbeatService private constructor(private val context: Context) {
      * 构建心跳请求
      */
     private fun buildHeartbeatRequest(): HeartbeatRequest {
+        // 使用 DeviceStatusCollector 收集设备状态
+        val status = deviceStatusCollector.collectDeviceStatus()
+        
         return HeartbeatRequest(
             deviceId = deviceIdManager.getDeviceId(),
             serverDeviceId = deviceIdManager.getServerDeviceId(),
-            appVersion = getAppVersion(),
-            model = Build.MODEL,
-            osVersion = "Android ${Build.VERSION.RELEASE}",
-            battery = getBatteryLevel(),
-            charging = isCharging(),
-            network = getNetworkType(),
-            groupTag = getGroupTag(),
+            appVersion = status.appVersion,
+            model = status.model,
+            osVersion = status.osVersion,
+            battery = status.battery,
+            charging = status.charging,
+            network = status.network,
+            groupTag = status.groupTag,
             script = currentScriptStatus,
             accessibilityEnabled = accessibilityEnabled,
             lastError = lastError,
-            resourceStats = getResourceStats(),
+            resourceStats = status.resourceStats,
             results = taskQueue.consumeTaskResults()
         )
     }
@@ -367,10 +383,12 @@ class HeartbeatService private constructor(private val context: Context) {
             config.updatePartial(configMap)
         }
 
-        // 处理命令
-        response.commands?.forEach { command ->
-            logger.info("HeartbeatService", "Received command: ${command.type}")
-            processCommand(command)
+        // 委托 CommandProcessor 处理命令
+        response.commands?.let { commands ->
+            if (commands.isNotEmpty()) {
+                logger.info("HeartbeatService", "Received ${commands.size} commands")
+                commandProcessor.process(commands)
+            }
         }
 
         // 同步服务器时间（可选）
@@ -405,24 +423,6 @@ class HeartbeatService private constructor(private val context: Context) {
     }
 
     /**
-     * 处理服务器命令
-     */
-    private fun processCommand(command: Command) {
-        val task = taskQueue.createTaskFromCommand(
-            commandId = command.id,
-            type = command.type,
-            payload = command.params,
-            expiresAt = command.expiresAt
-        )
-
-        task?.let {
-            taskQueue.addTask(it)
-        } ?: run {
-            logger.error("HeartbeatService", "Failed to create task from command: ${command.type}")
-        }
-    }
-
-    /**
      * 进入降级模式
      */
     private fun enterDegradedMode() {
@@ -450,63 +450,6 @@ class HeartbeatService private constructor(private val context: Context) {
      */
     fun reportError(code: String, message: String?) {
         lastError = ErrorInfo(code = code, message = message)
-    }
-
-    // ========== 辅助方法 ==========
-
-    private fun getAppVersion(): String {
-        return try {
-            val packageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
-            packageInfo.versionName ?: "1.0.0"
-        } catch (e: Exception) {
-            "1.0.0"
-        }
-    }
-
-    private fun getBatteryLevel(): Float {
-        val batteryManager = context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
-        val batteryLevel = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
-        return batteryLevel / 100f
-    }
-
-    private fun isCharging(): Boolean {
-        val batteryManager = context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
-        return batteryManager.isCharging
-    }
-
-    private fun getNetworkType(): String {
-        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
-        val networkInfo = connectivityManager.activeNetworkInfo
-        return when {
-            networkInfo == null || !networkInfo.isConnected -> "none"
-            networkInfo.type == android.net.ConnectivityManager.TYPE_WIFI -> "wifi"
-            networkInfo.type == android.net.ConnectivityManager.TYPE_MOBILE -> {
-                when (networkInfo.subtype) {
-                    android.telephony.TelephonyManager.NETWORK_TYPE_LTE -> "4g"
-                    android.telephony.TelephonyManager.NETWORK_TYPE_NR -> "5g"
-                    else -> "mobile"
-                }
-            }
-            else -> "unknown"
-        }
-    }
-
-    private fun getGroupTag(): String? {
-        // 从本地存储获取分组标签
-        val prefs = context.getSharedPreferences("agent_prefs", Context.MODE_PRIVATE)
-        return prefs.getString("group_tag", null)
-    }
-
-    private fun getResourceStats(): ResourceStats {
-        // 简单的资源统计，实际可以更精确
-        val runtime = Runtime.getRuntime()
-        val usedMemory = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024)
-
-        return ResourceStats(
-            cpuPercent = 0, // 需要更复杂的实现
-            memoryMb = usedMemory.toInt(),
-            storageAvailableMb = context.filesDir.freeSpace / (1024 * 1024)
-        )
     }
 
     /**

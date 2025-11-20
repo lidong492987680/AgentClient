@@ -1,456 +1,186 @@
 package com.example.agentclient.scripts.engine
 
 import android.content.Context
-import android.os.Handler
-import android.os.Looper
-import com.example.agentclient.accessibility.AgentAccessibilityService
-import com.example.agentclient.core.Config
 import com.example.agentclient.core.Logger
-import com.example.agentclient.data.TaskQueue
-import com.example.agentclient.network.HeartbeatService
-import com.example.agentclient.scripts.BaseScript
-import com.example.agentclient.scripts.TestScript
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
 
 /**
- * スクリプトエンジン
- * 自動化スクリプトの管理・実行を担当する
+ * 脚本调度引擎
+ * 负责管理和执行脚本的生命周期
+ * 
+ * 职责：
+ * - 启动/停止脚本
+ * - 管理脚本执行的协程
+ * - 调用脚本的生命周期方法
+ * - 提供脚本运行状态查询
  */
-class ScriptEngine private constructor(private val context: Context) {
-
-    private val logger = Logger.getInstance(context)
-    private val config = Config.getInstance(context)
-    private val taskQueue = TaskQueue.getInstance(context)
-    private val heartbeatService = HeartbeatService.getInstance(context)
-
-    private val handler = Handler(Looper.getMainLooper())
-    private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-
-    // スクリプト登録
-    private val scriptRegistry = ConcurrentHashMap<String, () -> BaseScript>()
-
-    // 現在のスクリプト
+object ScriptEngine {
+    
+    private var context: Context? = null
+    private var logger: Logger? = null
+    
+    // 脚本注册表：存储脚本工厂函数
+    private val scriptFactories: MutableMap<String, (com.example.agentclient.scripts.behavior.HumanizedAction) -> BaseScript> = mutableMapOf()
+    
+    // 当前正在运行的脚本
     private var currentScript: BaseScript? = null
-    private var currentScriptKey: String? = null
-
-    // 状態
-    private val isRunning = AtomicBoolean(false)
-    private val isPaused = AtomicBoolean(false)
-    private val scriptStartTime = AtomicLong(0)
-    private val lastTickTime = AtomicLong(0)
-
-    // Tick ジョブ
-    private var tickJob: Job? = null
-
-    companion object {
-        @Volatile
-        private var instance: ScriptEngine? = null
-
-        fun getInstance(context: Context): ScriptEngine {
-            return instance ?: synchronized(this) {
-                instance ?: ScriptEngine(context.applicationContext).also {
-                    instance = it
-                    it.initialize()
-                }
-            }
-        }
-    }
-
-    enum class ScriptState {
-        IDLE,
-        STARTING,
-        RUNNING,
-        PAUSED,
-        STOPPING,
-        ERROR
-    }
-
-    data class ScriptResult(
-        val scriptKey: String,
-        val success: Boolean,
-        val errorCode: String? = null,
-        val errorMessage: String? = null,
-        val runTime: Long = 0,
-        val completedTasks: Int = 0
-    )
-
+    
+    // 脚本执行的协程任务
+    private var scriptJob: Job? = null
+    
+    // 协程作用域
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    
     /**
-     * 初期化
+     * 初始化 ScriptEngine
+     * 必须在使用前调用
      */
-    private fun initialize() {
-        registerBuiltinScripts()
-        startTaskProcessor()
-        logger.info("ScriptEngine", "Script engine initialized")
+    fun initialize(ctx: Context) {
+        context = ctx
+        logger = Logger.getInstance(ctx)
     }
-
+    
     /**
-     * 内蔵スクリプト登録
+     * 启动脚本
+     * 如果已有脚本在运行，会先停止旧脚本
      */
-    private fun registerBuiltinScripts() {
-        registerScript("test_script") { TestScript(context) }
-        // TODO: 他のゲーム用スクリプトをここに登録
-    }
-
-    /**
-     * タスク処理ループ（修正版）
-     *
-     * - 以前は「スクリプトが動いていないときだけ」キューを消費していた。
-     * - その結果、RUNNING 中は STOP/PAUSE/RESUME が永遠に処理されない問題があった。
-     * - 今は常に processNextTask() を呼び出し、各タスクの中で「現在の状態に応じて実行可否」を判断する。
-     */
-    private fun startTaskProcessor() {
-        scope.launch {
-            while (true) {
-                delay(1000) // 1秒ごとに1件だけ見る（十分）
-                processNextTask()
-            }
-        }
-    }
-
-    /**
-     * 次のタスクを処理
-     */
-    private fun processNextTask() {
-        val task = taskQueue.getNextTask() ?: return
-
-        logger.info("ScriptEngine", "Processing task: ${task.taskId} (${task.type})")
-
-        scope.launch {
-            try {
-                when (task.type) {
-                    TaskQueue.TaskType.START_SCRIPT -> {
-                        // すでにスクリプトが動いている場合は、新しい START_SCRIPT を受け付けない
-                        if (isRunning.get()) {
-                            logger.warn(
-                                "ScriptEngine",
-                                "START_SCRIPT ignored because another script is already running: $currentScriptKey"
-                            )
-                            taskQueue.markTaskResult(
-                                task,
-                                TaskQueue.TaskStatus.FAILED,
-                                "SCRIPT_ALREADY_RUNNING",
-                                "Another script ($currentScriptKey) is already running"
-                            )
-                        } else {
-                            val scriptKey = task.payload["script_key"] as? String
-                            val params = task.payload["params"] as? Map<String, Any> ?: emptyMap()
-
-                            if (scriptKey != null) {
-                                startScript(scriptKey, params)
-                                taskQueue.markTaskResult(
-                                    task,
-                                    TaskQueue.TaskStatus.COMPLETED
-                                )
-                            } else {
-                                taskQueue.markTaskResult(
-                                    task,
-                                    TaskQueue.TaskStatus.FAILED,
-                                    "INVALID_PARAMS",
-                                    "Missing script_key"
-                                )
-                            }
-                        }
-                    }
-
-                    TaskQueue.TaskType.STOP_SCRIPT -> {
-                        // 実行中でなくても STOP は「状態リセット」として受け付ける
-                        stopScript()
-                        taskQueue.markTaskResult(
-                            task,
-                            TaskQueue.TaskStatus.COMPLETED
-                        )
-                    }
-
-                    TaskQueue.TaskType.PAUSE -> {
-                        pauseScript()
-                        taskQueue.markTaskResult(
-                            task,
-                            TaskQueue.TaskStatus.COMPLETED
-                        )
-                    }
-
-                    TaskQueue.TaskType.RESUME -> {
-                        resumeScript()
-                        taskQueue.markTaskResult(
-                            task,
-                            TaskQueue.TaskStatus.COMPLETED
-                        )
-                    }
-
-                    else -> {
-                        logger.warn("ScriptEngine", "Unhandled task type: ${task.type}")
-                        taskQueue.markTaskResult(
-                            task,
-                            TaskQueue.TaskStatus.FAILED,
-                            "UNSUPPORTED_TYPE",
-                            "Task type not supported by ScriptEngine"
-                        )
-                    }
-                }
-            } catch (e: Exception) {
-                logger.error("ScriptEngine", "Error processing task", e)
-                taskQueue.markTaskResult(
-                    task,
-                    TaskQueue.TaskStatus.FAILED,
-                    "EXECUTION_ERROR",
-                    e.message
-                )
-
-                if (task.canRetry() && isRetriableError(e)) {
-                    taskQueue.retryTask(task, 5000) // 5秒後に再試行
-                }
-            }
-        }
-    }
-
-    /**
-     * スクリプト登録
-     */
-    fun registerScript(key: String, factory: () -> BaseScript) {
-        scriptRegistry[key] = factory
-        logger.info("ScriptEngine", "Script registered: $key")
-    }
-
-    /**
-     * スクリプト開始
-     */
-    suspend fun startScript(key: String, params: Map<String, Any> = emptyMap()) {
-        if (!AgentAccessibilityService.isEnabled()) {
-            logger.error("ScriptEngine", "Accessibility service not enabled")
-            heartbeatService.reportError("ACCESSIBILITY_DISABLED", "Accessibility service not enabled")
-            return
-        }
-
-        if (!config.get().isInAllowedTime()) {
-            logger.warn("ScriptEngine", "Not in allowed time range")
-            heartbeatService.reportError("NOT_IN_ALLOWED_TIME", "Script execution not allowed at this time")
-            return
-        }
-
-        // 既存スクリプト停止
+    fun startScript(script: BaseScript) {
+        val log = logger ?: return
+        
+        // 如果已有脚本在运行，先停止
         if (currentScript != null) {
-            logger.info("ScriptEngine", "Stopping current script before starting new one")
-            stopScript()
+            log.info("ScriptEngine", "Stopping current script before starting new one")
+            stopCurrentScript()
         }
-
-        val factory = scriptRegistry[key]
-        if (factory == null) {
-            logger.error("ScriptEngine", "Script not found: $key")
-            heartbeatService.reportError("SCRIPT_NOT_FOUND", "Script $key not registered")
-            return
-        }
-
-        val script = factory()
+        
         currentScript = script
-        currentScriptKey = key
-
-        isRunning.set(true)
-        isPaused.set(false)
-        scriptStartTime.set(System.currentTimeMillis())
-
-        updateHeartbeatStatus(ScriptState.STARTING)
-        logger.info("ScriptEngine", "Starting script: $key")
-
-        try {
-            script.onStart(params)
-            startTickLoop()
-            updateHeartbeatStatus(ScriptState.RUNNING)
-        } catch (e: Exception) {
-            logger.error("ScriptEngine", "Failed to start script", e)
-            handleScriptError(e)
+        
+        // 启动协程执行脚本
+        scriptJob = scope.launch {
+            try {
+                log.info("ScriptEngine", "Starting script: ${script.getScriptName()}")
+                
+                // 调用脚本的 onStart
+                script.onStart()
+                
+                // 循环执行脚本步骤，直到脚本完成或被取消
+                while (isActive && !script.isFinished()) {
+                    script.runStepSafely()
+                    delay(script.stepIntervalMs)
+                }
+                
+                // 调用脚本的 onStop
+                script.onStop()
+                
+                log.info("ScriptEngine", "Script finished: ${script.getScriptName()}")
+            } catch (e: Exception) {
+                log.error("ScriptEngine", "Error running script", e)
+            } finally {
+                // 清理
+                currentScript = null
+                scriptJob = null
+            }
         }
     }
-
+    
     /**
-     * スクリプト停止
+     * 停止当前运行的脚本
      */
-    fun stopScript() {
-        if (currentScript == null) {
-            logger.warn("ScriptEngine", "No script running")
-            // 何も動いていなくても状態だけ IDLE にしておく
-            updateHeartbeatStatus(ScriptState.IDLE)
-            return
-        }
-
-        logger.info("ScriptEngine", "Stopping script: $currentScriptKey")
-
-        stopTickLoop()
-
-        try {
-            currentScript?.onStop()
-        } catch (e: Exception) {
-            logger.error("ScriptEngine", "Error stopping script", e)
-        }
-
+    fun stopCurrentScript() {
+        val log = logger ?: return
+        
+        // 标记脚本为完成状态
+        currentScript?.markFinished()
+        
+        // 取消协程
+        scriptJob?.cancel()
+        
+        log.info("ScriptEngine", "Script stopped")
+        
+        // 清理
         currentScript = null
-        currentScriptKey = null
-        isRunning.set(false)
-        isPaused.set(false)
-
-        updateHeartbeatStatus(ScriptState.IDLE)
+        scriptJob = null
     }
-
-    fun pauseScript() {
-        if (!isRunning.get()) {
-            logger.warn("ScriptEngine", "No script running to pause")
-            return
+    
+    /**
+     * 检查是否有脚本正在运行
+     */
+    fun isRunning(): Boolean {
+        return scriptJob?.isActive == true
+    }
+    
+    /**
+     * 注册脚本工厂
+     * 允许按名称创建和启动脚本
+     * 
+     * @param name 脚本名称（唯一标识）
+     * @param factory 脚本工厂函数，接收 HumanizedAction 返回 BaseScript
+     */
+    fun registerScript(name: String, factory: (com.example.agentclient.scripts.behavior.HumanizedAction) -> BaseScript) {
+        val log = logger
+        
+        if (scriptFactories.containsKey(name)) {
+            log?.warn("ScriptEngine", "脚本 '$name' 已存在，将被覆盖")
         }
-
-        if (isPaused.get()) {
-            logger.debug("ScriptEngine", "Script already paused")
-            return
+        
+        scriptFactories[name] = factory
+        log?.info("ScriptEngine", "脚本 '$name' 注册成功")
+    }
+    
+    /**
+     * 按名称启动脚本
+     * 从注册表中查找脚本工厂并创建实例启动
+     * 
+     * @param name 脚本名称
+     * @param humanizedAction HumanizedAction 实例
+     * @return true 如果启动成功，false 如果脚本未注册
+     */
+    fun startScriptByName(name: String, humanizedAction: com.example.agentclient.scripts.behavior.HumanizedAction): Boolean {
+        val log = logger ?: return false
+        
+        val factory = scriptFactories[name]
+        if (factory == null) {
+            log.warn("ScriptEngine", "脚本 '$name' 未注册，无法启动")
+            return false
         }
-
-        isPaused.set(true)
-        currentScript?.onPause()
-        updateHeartbeatStatus(ScriptState.PAUSED)
-        logger.info("ScriptEngine", "Script paused")
+        
+        // 使用工厂创建脚本实例
+        val script = factory(humanizedAction)
+        
+        // 启动脚本
+        startScript(script)
+        log.info("ScriptEngine", "通过名称启动脚本: $name")
+        
+        return true
     }
-
-    fun resumeScript() {
-        if (!isRunning.get()) {
-            logger.warn("ScriptEngine", "No script running to resume")
-            return
-        }
-
-        if (!isPaused.get()) {
-            logger.debug("ScriptEngine", "Script is not paused")
-            return
-        }
-
-        isPaused.set(false)
-        currentScript?.onResume()
-        updateHeartbeatStatus(ScriptState.RUNNING)
-        logger.info("ScriptEngine", "Script resumed")
+    
+    /**
+     * 获取当前运行脚本的名称
+     */
+    fun getCurrentScriptName(): String? {
+        return currentScript?.getScriptName()
     }
-
-    private fun startTickLoop() {
-        val tickInterval = config.get().scriptTickMs
-        tickJob = scope.launch {
-            while (isRunning.get()) {
-                if (!isPaused.get()) {
-                    tick()
-                }
-                delay(tickInterval)
-            }
-        }
-    }
-
-    private fun stopTickLoop() {
-        tickJob?.cancel()
-        tickJob = null
-    }
-
-    private suspend fun tick() {
-        val now = System.currentTimeMillis()
-        val runtime = now - scriptStartTime.get()
-        val maxRuntime = config.get().maxScriptRuntimeMin * 60 * 1000L
-
-        if (runtime > maxRuntime) {
-            logger.warn("ScriptEngine", "Script exceeded max runtime, stopping")
-            stopScript()
-            heartbeatService.reportError("SCRIPT_TIMEOUT", "Script exceeded maximum runtime")
-            return
-        }
-
-        try {
-            currentScript?.onTick()
-            lastTickTime.set(now)
-        } catch (e: Exception) {
-            logger.error("ScriptEngine", "Error in script tick", e)
-            handleScriptError(e)
-        }
-    }
-
-    private fun handleScriptError(error: Throwable) {
-        currentScript?.onError(error)
-
-        when (error) {
-            is ScriptException -> {
-                when (error.type) {
-                    ScriptException.Type.RECOVERABLE -> {
-                        logger.warn("ScriptEngine", "Recoverable error: ${error.message}")
-                    }
-
-                    ScriptException.Type.FATAL -> {
-                        logger.error("ScriptEngine", "Fatal error: ${error.message}")
-                        stopScript()
-                        heartbeatService.reportError("SCRIPT_FATAL_ERROR", error.message)
-                    }
-
-                    ScriptException.Type.TIMEOUT -> {
-                        logger.error("ScriptEngine", "Timeout error: ${error.message}")
-                        currentScript?.reset()
-                    }
-                }
-            }
-
-            else -> {
-                stopScript()
-                heartbeatService.reportError("SCRIPT_ERROR", error.message)
-            }
-        }
-
-        updateHeartbeatStatus(ScriptState.ERROR)
-    }
-
-    private fun isRetriableError(error: Throwable): Boolean {
-        return error is ScriptException && error.type == ScriptException.Type.RECOVERABLE
-    }
-
-    private fun updateHeartbeatStatus(state: ScriptState) {
-        val status = HeartbeatService.ScriptStatus(
-            key = currentScriptKey ?: "",
-            status = state.name.lowercase(),
-            lastSuccess = if (state == ScriptState.IDLE) System.currentTimeMillis() else null,
-            dailyRuntimeMin = ((System.currentTimeMillis() - scriptStartTime.get()) / 60000).toInt(),
-            currentState = currentScript?.getStatistics()?.currentState,
-            startTime = scriptStartTime.get()
-        )
-        heartbeatService.updateScriptStatus(status)
-    }
-
-    fun getStatus(): EngineStatus {
-        return EngineStatus(
-            isRunning = isRunning.get(),
-            isPaused = isPaused.get(),
-            currentScriptKey = currentScriptKey,
-            scriptStartTime = scriptStartTime.get(),
-            lastTickTime = lastTickTime.get(),
-            registeredScripts = scriptRegistry.keys.toList()
-        )
-    }
-
-    data class EngineStatus(
-        val isRunning: Boolean,
-        val isPaused: Boolean,
-        val currentScriptKey: String?,
-        val scriptStartTime: Long,
-        val lastTickTime: Long,
-        val registeredScripts: List<String>
-    )
 }
 
 /**
- * スクリプト例外
+ * 脚本异常类
+ * 用于区分不同类型的脚本错误
  */
 class ScriptException(
     message: String,
     val type: Type,
     cause: Throwable? = null
 ) : Exception(message, cause) {
-
+    
     enum class Type {
-        RECOVERABLE,
-        FATAL,
-        TIMEOUT
+        RECOVERABLE,  // 可恢复的错误
+        FATAL,        // 致命错误
+        TIMEOUT       // 超时错误
     }
 }
