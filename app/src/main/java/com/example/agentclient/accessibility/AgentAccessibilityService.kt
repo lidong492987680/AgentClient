@@ -56,7 +56,7 @@ class AgentAccessibilityService : AccessibilityService(), GestureDispatcher.Gest
         
         // 初始化委托对象
         gestureDispatcher = GestureDispatcher(this, logger)
-        nodeFinder = NodeFinder(logger)
+        nodeFinder = NodeFinder(logger) { getInstance() }
         
         logger.info("AccessibilityService", "Service created")
     }

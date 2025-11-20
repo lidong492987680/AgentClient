@@ -1,26 +1,36 @@
 package com.example.agentclient.core
 
 import android.content.Context
+import com.example.agentclient.accessibility.AgentAccessibilityService
+import com.example.agentclient.accessibility.NodeFinder
 import com.example.agentclient.scripts.behavior.HumanizedAction
 import com.example.agentclient.scripts.engine.ScriptEngine
 import com.example.agentclient.scripts.engine.TestScript
 
 /**
- * UI操作统一入口
- * 作为门面模式，对外提供简单的脚本控制接口
+ * UI操作統一エントリーポイント
+ * ファサードパターンとして、外部にシンプルなスクリプト制御インターフェースを提供
  * 
- * 职责：
- * - 管理 HumanizedAction 实例
- * - 提供脚本启动/停止接口
- * - 桥接 MainActivity 和 ScriptEngine
- * - 注册所有可用脚本
+ * 責務：
+ * - HumanizedActionインスタンスの管理
+ * - スクリプトの起動/停止インターフェース提供
+ * - MainActivityとScriptEngineのブリッジ
+ * - すべての利用可能なスクリプトの登録
+ * - UI状態検出のビジネスセマンティクス提供
  */
 class UiDriver private constructor(private val context: Context) {
     
     private val logger = Logger.getInstance(context)
     private var humanizedAction: HumanizedAction? = null
     
-    // 是否已注册脚本
+    // NodeFinderインスタンス（UI検出用）
+    private val nodeFinder: NodeFinder by lazy {
+        NodeFinder(logger) {
+            AgentAccessibilityService.getInstance()  // 注意这里应该调用 getInstance() 方法
+        }
+    }
+    
+    // スクリプト登録済みフラグ
     private var scriptsRegistered = false
     
     companion object {
@@ -31,7 +41,7 @@ class UiDriver private constructor(private val context: Context) {
             return instance ?: synchronized(this) {
                 instance ?: UiDriver(context.applicationContext).also {
                     instance = it
-                    // 初始化时注册所有脚本
+                    // 初期化時にすべてのスクリプトを登録
                     it.registerAllScripts()
                 }
             }
@@ -39,58 +49,58 @@ class UiDriver private constructor(private val context: Context) {
     }
     
     /**
-     * 注册所有可用的脚本
-     * 在应用启动时调用一次
+     * すべての利用可能なスクリプトを登録
+     * アプリケーション起動時に一度呼び出される
      */
     private fun registerAllScripts() {
         if (scriptsRegistered) {
-            logger.warn("UiDriver", "脚本已经注册过，跳过重复注册")
+            logger.warn("UiDriver", "スクリプトは既に登録されています、重複登録をスキップ")
             return
         }
         
-        // 注册测试脚本
+        // テストスクリプトを登録
         ScriptEngine.registerScript("test_script") { humanizedAction ->
             TestScript(humanizedAction, logger)
         }
         
-        // 将来可以在这里注册更多脚本
+        // 将来ここでより多くのスクリプトを登録できる
         // ScriptEngine.registerScript("game_a_script") { humanizedAction ->
         //     GameAScript(humanizedAction, logger)
         // }
         
         scriptsRegistered = true
-        logger.info("UiDriver", "所有脚本注册完成")
+        logger.info("UiDriver", "すべてのスクリプト登録完了")
     }
     
     /**
-     * 启动测试脚本
-     * 使用脚本注册系统按名称启动
+     * テストスクリプトを起動
+     * スクリプト登録システムを使用して名前で起動
      */
     fun startTestScript() {
-        // 初始化 HumanizedAction（如果还未初始化）
+        // HumanizedActionを初期化（まだ初期化されていない場合）
         if (humanizedAction == null) {
             humanizedAction = HumanizedAction(context, BehaviorProfile.DEFAULT)
             logger.info("UiDriver", "HumanizedAction initialized with DEFAULT profile")
         }
         
-        // 按名称启动脚本
+        // 名前でスクリプトを起動
         val success = ScriptEngine.startScriptByName("test_script", humanizedAction!!)
         
         if (success) {
-            logger.info("UiDriver", "测试脚本启动成功")
+            logger.info("UiDriver", "テストスクリプト起動成功")
         } else {
-            logger.error("UiDriver", "测试脚本启动失败：脚本未注册")
+            logger.error("UiDriver", "テストスクリプト起動失敗：スクリプトが未登録")
         }
     }
     
     /**
-     * 按名称启动脚本（通用接口，供 CommandProcessor 等使用）
+     * 名前でスクリプトを起動（汎用インターフェース、CommandProcessorなどが使用）
      * 
-     * @param scriptName 脚本名称
-     * @return true 如果启动成功
+     * @param scriptName スクリプト名
+     * @return true 起動成功の場合
      */
     fun startScriptByName(scriptName: String): Boolean {
-        // 初始化 HumanizedAction（如果还未初始化）
+        // HumanizedActionを初期化（まだ初期化されていない場合）
         if (humanizedAction == null) {
             humanizedAction = HumanizedAction(context, BehaviorProfile.DEFAULT)
             logger.info("UiDriver", "HumanizedAction initialized with DEFAULT profile")
@@ -99,42 +109,42 @@ class UiDriver private constructor(private val context: Context) {
         val success = ScriptEngine.startScriptByName(scriptName, humanizedAction!!)
         
         if (success) {
-            logger.info("UiDriver", "脚本 '$scriptName' 启动成功")
+            logger.info("UiDriver", "スクリプト '$scriptName' 起動成功")
         } else {
-            logger.error("UiDriver", "脚本 '$scriptName' 启动失败：脚本未注册")
+            logger.error("UiDriver", "スクリプト '$scriptName' 起動失敗：スクリプトが未登録")
         }
         
         return success
     }
     
     /**
-     * 停止当前脚本
+     * 現在のスクリプトを停止
      */
     fun stopScript() {
         ScriptEngine.stopCurrentScript()
-        logger.info("UiDriver", "当前脚本已停止")
+        logger.info("UiDriver", "現在のスクリプトを停止")
     }
     
     /**
-     * 检查脚本是否正在运行
+     * スクリプトが実行中かチェック
      */
     fun isScriptRunning(): Boolean {
         return ScriptEngine.isRunning()
     }
     
     /**
-     * 获取当前运行脚本的名称
+     * 現在実行中のスクリプト名を取得
      */
     fun getCurrentScriptName(): String? {
         return ScriptEngine.getCurrentScriptName()
     }
     
     /**
-     * 设置行为配置
-     * 切换 HumanizedAction 使用的 BehaviorProfile
+     * 行動設定を設定
+     * HumanizedActionが使用するBehaviorProfileを切り替え
      * 
-     * @param profileName 配置名称（DEFAULT / FAST_YOUNG / SLOW_CAREFUL）
-     * @return true 如果切换成功
+     * @param profileName 設定名（DEFAULT / FAST_YOUNG / SLOW_CAREFUL）
+     * @return true 切り替え成功の場合
      */
     fun setBehaviorProfile(profileName: String): Boolean {
         val profile = when (profileName.uppercase()) {
@@ -142,20 +152,100 @@ class UiDriver private constructor(private val context: Context) {
             "FAST_YOUNG" -> BehaviorProfile.FAST_YOUNG
             "SLOW_CAREFUL" -> BehaviorProfile.SLOW_CAREFUL
             else -> {
-                logger.warn("UiDriver", "未知的行为配置: $profileName")
+                logger.warn("UiDriver", "未知の行動設定: $profileName")
                 return false
             }
         }
         
-        // 如果 HumanizedAction 还未初始化，先初始化
+        // HumanizedActionがまだ初期化されていない場合は先に初期化
         if (humanizedAction == null) {
             humanizedAction = HumanizedAction(context, profile)
             logger.info("UiDriver", "HumanizedAction initialized with $profileName profile")
         } else {
             humanizedAction!!.setProfile(profile)
-            logger.info("UiDriver", "行为配置切换为: $profileName")
+            logger.info("UiDriver", "行動設定切替: $profileName")
         }
         
         return true
+    }
+    
+    // ========== UI状態検出のビジネスセマンティクス関数 ==========
+    
+    /**
+     * ログイン画面が消えるまで待機
+     * ログイン画面特有のUI要素（例：「ログイン」ボタン）が消失したことを確認
+     * 
+     * @param timeoutMs タイムアウト時間（ミリ秒）
+     * @return true ログイン画面が消えた、false タイムアウト
+     */
+    suspend fun waitForLoginScreenGone(timeoutMs: Long = 10000): Boolean {
+        logger.info("UiDriver", "ログイン画面の消失を待機中...")
+        
+        // 「ログイン」「LOGIN」などのテキストが消えるのを待つ
+        // 実際のゲームに合わせて調整が必要
+        val gone = nodeFinder.waitForNodeDisappear(
+            text = "ログイン",  // 実際のゲームのログインボタンテキストに変更
+            exactMatch = false,
+            timeoutMs = timeoutMs
+        )
+        
+        if (gone) {
+            logger.info("UiDriver", "ログイン画面消失確認")
+        } else {
+            logger.warn("UiDriver", "ログイン画面消失待機タイムアウト")
+        }
+        
+        return gone
+    }
+    
+    /**
+     * メインメニュー画面が出現するまで待機
+     * メインメニュー特有のUI要素（例：「開始」「スタート」ボタン）が出現することを確認
+     * 
+     * @param timeoutMs タイムアウト時間（ミリ秒）
+     * @return true メインメニュー検出成功、false タイムアウト
+     */
+    suspend fun waitForMainMenu(timeoutMs: Long = 15000): Boolean {
+        logger.info("UiDriver", "メインメニューUIを待機中...")
+        
+        // 「開始」「スタート」「ホーム」などのテキストを待つ
+        // 実際のゲームに合わせて複数の候補をチェックすることも可能
+        val result = nodeFinder.waitForNodeByText(
+            text = "開始",  // 実際のゲームのメインメニューボタンテキストに変更
+            exactMatch = false,
+            timeoutMs = timeoutMs
+        )
+        
+        // 結果のノードを回収
+        result?.node?.recycle()
+        
+        if (result != null) {
+            logger.info("UiDriver", "メインメニューUI検出完了")
+            return true
+        } else {
+            logger.warn("UiDriver", "メインメニューUI待機タイムアウト")
+            return false
+        }
+    }
+    
+    /**
+     * 特定のテキストを持つノードが出現するまで待機（汎用）
+     * 
+     * @param text 検索するテキスト
+     * @param timeoutMs タイムアウト時間
+     * @return true ノード検出成功
+     */
+    suspend fun waitForText(text: String, timeoutMs: Long = 10000): Boolean {
+        logger.debug("UiDriver", "テキスト '$text' を待機中...")
+        
+        val result = nodeFinder.waitForNodeByText(
+            text = text,
+            exactMatch = false,
+            timeoutMs = timeoutMs
+        )
+        
+        result?.node?.recycle()
+        
+        return result != null
     }
 }

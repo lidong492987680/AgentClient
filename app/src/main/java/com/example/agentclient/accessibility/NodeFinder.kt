@@ -3,20 +3,24 @@ package com.example.agentclient.accessibility
 import android.graphics.Rect
 import android.view.accessibility.AccessibilityNodeInfo
 import com.example.agentclient.core.Logger
+import kotlinx.coroutines.delay
 
 /**
- * 节点查找器
- * 负责在 AccessibilityNodeInfo 树中查找节点
+ * ノードファインダー
+ * AccessibilityNodeInfoツリー内でノードを検索する
  * 
- * Recycle 策略说明：
- * 1. 传入的 root 节点由调用者负责回收（如果需要）。
- * 2. 内部递归过程中产生的中间节点（child），如果未被选中作为结果返回，则在内部 recycle。
- * 3. 返回的 NodeSearchResult 包含的 node，由调用者负责 recycle。
+ * Recycle戦略：
+ * 1. 渡されたrootノードは呼び出し側が回収する責任を持つ（必要な場合）
+ * 2. 内部の再帰処理中に生成された中間ノード（child）は、結果として選択されなかった場合は内部でrecycleする
+ * 3. 返されたNodeSearchResultに含まれるnodeは、呼び出し側がrecycleする責任を持つ
  */
-class NodeFinder(private val logger: Logger) {
+class NodeFinder(
+    private val logger: Logger,
+    private val serviceProvider: () -> AgentAccessibilityService?
+) {
 
     /**
-     * 节点查找结果
+     * ノード検索結果
      */
     data class NodeSearchResult(
         val node: AccessibilityNodeInfo,
@@ -33,7 +37,20 @@ class NodeFinder(private val logger: Logger) {
     }
 
     /**
-     * 通过文本查找节点
+     * 現在のアクティブウィンドウのルートノードを取得
+     * 注意：返されたノードは呼び出し側がrecycleする必要がある
+     */
+    fun getRootNode(): AccessibilityNodeInfo? {
+        return try {
+            serviceProvider()?.rootInActiveWindow
+        } catch (e: Exception) {
+            logger.error("NodeFinder", "ルートノード取得エラー", e)
+            null
+        }
+    }
+
+    /**
+     * テキストでノードを検索
      */
     fun findByText(
         root: AccessibilityNodeInfo?,
@@ -64,7 +81,7 @@ class NodeFinder(private val logger: Logger) {
     }
 
     /**
-     * 通过ID查找节点
+     * IDでノードを検索
      */
     fun findById(
         root: AccessibilityNodeInfo?,
@@ -76,11 +93,11 @@ class NodeFinder(private val logger: Logger) {
         }
 
         return try {
-            // findAccessibilityNodeInfosByViewId 返回的是新创建的节点列表，需要负责回收
+            // findAccessibilityNodeInfosByViewIdは新しく作成されたノードリストを返すので、回収する必要がある
             val nodes = root.findAccessibilityNodeInfosByViewId(resourceId)
             if (!nodes.isNullOrEmpty()) {
                 val target = nodes[0]
-                // 回收其他不需要的节点
+                // 他の不要なノードを回収
                 for (i in 1 until nodes.size) {
                     nodes[i].recycle()
                 }
@@ -103,7 +120,7 @@ class NodeFinder(private val logger: Logger) {
     }
 
     /**
-     * 通过类名查找节点
+     * クラス名でノードを検索
      */
     fun findByClassName(
         root: AccessibilityNodeInfo?,
@@ -125,19 +142,136 @@ class NodeFinder(private val logger: Logger) {
     }
 
     /**
-     * 递归查找节点
-     * 注意：此方法不会回收 root，但会回收遍历过程中创建的未匹配子节点
+     * テキストでノードが出現するまで待機（サスペンド関数）
+     * @param text 検索するテキスト
+     * @param exactMatch 完全一致か部分一致か
+     * @param timeoutMs タイムアウト時間（ミリ秒）
+     * @param pollIntervalMs ポーリング間隔（ミリ秒）
+     * @return 見つかったノード、タイムアウトした場合null
+     */
+    suspend fun waitForNodeByText(
+        text: String,
+        exactMatch: Boolean = false,
+        timeoutMs: Long = 10000,
+        pollIntervalMs: Long = 500
+    ): NodeSearchResult? {
+        val startTime = System.currentTimeMillis()
+
+        while (System.currentTimeMillis() - startTime < timeoutMs) {
+            val root = getRootNode()
+
+            if (root != null) {
+                var result: NodeSearchResult? = null
+                try {
+                    result = findByText(root, text, exactMatch)
+                    if (result != null) {
+                        logger.debug("NodeFinder", "テキスト '$text' を持つノードを検出")
+                        // root はここでは recycle しない。result.node を使い終わったら呼び出し側が recycle
+                        return result
+                    }
+                } finally {
+                    // 結果が null の場合は root を回収する。
+                    // 結果が非 null だが root == result.node のケースでは、
+                    // 呼び出し側の利用後に recycle されることを期待する。
+                    if (result == null) {
+                        root.recycle()
+                    }
+                }
+            }
+
+            delay(pollIntervalMs)
+        }
+
+        logger.warn("NodeFinder", "テキスト '$text' のノード待機タイムアウト")
+        return null
+    }
+
+    /**
+     * IDでノードが出現するまで待機（サスペンド関数）
+     */
+    suspend fun waitForNodeById(
+        resourceId: String,
+        timeoutMs: Long = 10000,
+        pollIntervalMs: Long = 500
+    ): NodeSearchResult? {
+        val startTime = System.currentTimeMillis()
+        
+        while (System.currentTimeMillis() - startTime < timeoutMs) {
+            val root = getRootNode()
+            
+            if (root != null) {
+                try {
+                    val result = findById(root, resourceId)
+                    if (result != null) {
+                        logger.debug("NodeFinder", "ID '$resourceId' を持つノードを検出")
+                        root.recycle()
+                        return result
+                    }
+                } finally {
+                    root.recycle()
+                }
+            }
+            
+            delay(pollIntervalMs)
+        }
+        
+        logger.warn("NodeFinder", "ID '$resourceId' のノード待機タイムアウト")
+        return null
+    }
+
+    /**
+     * 指定テキストのノードが消えるまで待機（サスペンド関数）
+     * ログイン画面の消失判定などに使用
+     */
+    suspend fun waitForNodeDisappear(
+        text: String,
+        exactMatch: Boolean = false,
+        timeoutMs: Long = 10000,
+        pollIntervalMs: Long = 500
+    ): Boolean {
+        val startTime = System.currentTimeMillis()
+        
+        while (System.currentTimeMillis() - startTime < timeoutMs) {
+            val root = getRootNode()
+            
+            if (root != null) {
+                try {
+                    val result = findByText(root, text, exactMatch)
+                    if (result == null) {
+                        // ノードが見つからない = 消えた
+                        logger.debug("NodeFinder", "テキスト '$text' のノード消失を確認")
+                        root.recycle()
+                        return true
+                    } else {
+                        // 結果のノードを回収
+                        result.node.recycle()
+                    }
+                } finally {
+                    root.recycle()
+                }
+            }
+            
+            delay(pollIntervalMs)
+        }
+        
+        logger.warn("NodeFinder", "テキスト '$text' のノード消失待機タイムアウト")
+        return false
+    }
+
+    /**
+     * ノードを再帰的に検索
+     * 注意：このメソッドはrootを回収しないが、走査中に作成された未マッチの子ノードは回収する
      */
     fun findNodeRecursive(
         node: AccessibilityNodeInfo,
         predicate: (AccessibilityNodeInfo) -> Boolean
     ): NodeSearchResult? {
         try {
-            // 检查当前节点
+            // 現在のノードをチェック
             if (predicate(node)) {
-                // 找到了！返回结果。注意：这里不 recycle node，因为它是结果的一部分。
-                // 如果 node 是 root，则由调用者决定 root 的生命周期。
-                // 如果 node 是 child，则它现在被结果引用，所有权转移给结果。
+                // 見つかった！結果を返す。注意：ここではnodeをrecycleしない、結果の一部だから
+                // nodeがrootの場合は、呼び出し側がrootのライフサイクルを決定
+                // nodeがchildの場合は、今は結果に参照されているので、所有権が結果に移る
                 return NodeSearchResult(
                     node = node,
                     text = node.text?.toString(),
@@ -148,18 +282,18 @@ class NodeFinder(private val logger: Logger) {
                 )
             }
 
-            // 递归查找子节点
+            // 子ノードを再帰的に検索
             val childCount = node.childCount
             for (i in 0 until childCount) {
                 val child = node.getChild(i) ?: continue
 
                 val result = findNodeRecursive(child, predicate)
                 if (result != null) {
-                    // 找到了！child (或其后代) 被 result 引用，不能回收 child。
+                    // 見つかった！child（またはその子孫）がresultに参照されているので、childを回収しない
                     return result
                 }
 
-                // 没找到，且 child 不是我们需要的结果，回收它。
+                // 見つからなかった、かつchildは必要な結果でないので、回収する
                 child.recycle()
             }
         } catch (e: Exception) {

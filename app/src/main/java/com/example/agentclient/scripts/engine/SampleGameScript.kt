@@ -4,6 +4,7 @@ import android.content.Context
 import com.example.agentclient.scripts.behavior.HumanizedAction
 import com.example.agentclient.core.Logger
 import com.example.agentclient.core.BehaviorProfile
+import com.example.agentclient.core.UiDriver
 import com.example.agentclient.accessibility.GestureDispatcher
 import kotlinx.coroutines.delay
 
@@ -12,6 +13,7 @@ import kotlinx.coroutines.delay
  * GameScriptTemplateを使用した実際の実装例
  * 
  * このスクリプトは実際のゲーム自動化の動作を模擬します
+ * NodeFinder + UiDriverを使用して画面状態を検出し、delay駆動から状態駆動に変更
  */
 class SampleGameScript(
     private val context: Context,
@@ -29,6 +31,9 @@ class SampleGameScript(
     // 開始時刻（分単位での実行時間計算用）
     private var startTimeMs = 0L
 
+    // UiDriverインスタンス（UI状態検出用）
+    private val uiDriver = UiDriver.getInstance(context)
+
     override fun getScriptName(): String = "SampleGameScript"
 
     /**
@@ -39,7 +44,7 @@ class SampleGameScript(
         startTimeMs = System.currentTimeMillis()
         taskLoopCount = 0
         
-        // 1秒待機（初期化シミュレーション）
+        // 短い待機（初期化シミュレーション）
         delay(1000)
         
         return GameState.LAUNCH_GAME
@@ -58,8 +63,12 @@ class SampleGameScript(
             val success = gestureDispatcher.click(randomX, randomY)
             
             if (success) {
-                logger.info(getScriptName(), "ゲームアプリ起動成功")
-                delay(5000) // ゲームロード待機
+                logger.info(getScriptName(), "ゲームアプリタップ成功")
+                
+                // 固定delayの代わりに、ログイン画面が出現するのを待つ
+                // ここでは簡略化のため、短い待機のみ（実際は「タイトル画面」などの検出も可能）
+                delay(3000)
+                
                 return GameState.CHECK_LOGIN
             } else {
                 return if (shouldRetry(GameState.LAUNCH_GAME)) {
@@ -82,30 +91,58 @@ class SampleGameScript(
 
     /**
      * ログイン状態確認
+     * 固定delayではなく、ログイン画面が消えたことをNodeFinderで確認
      */
     override suspend fun handleCheckLogin(): GameState {
         logger.info(getScriptName(), "ログイン状態を確認中...")
         
-        // ログイン画面の検出ロジックをここに実装
-        // 簡略化のため、常にログイン済みと仮定
-        delay(2000)
+        // UiDriverを使用してログイン画面の消失を待機
+        val loginGone = uiDriver.waitForLoginScreenGone(timeoutMs = 15000)
         
-        logger.info(getScriptName(), "ログイン済み確認")
-        return GameState.WAIT_MAIN_UI
+        if (loginGone) {
+            logger.info(getScriptName(), "ログイン完了確認")
+            return GameState.WAIT_MAIN_UI
+        } else {
+            logger.warn(getScriptName(), "ログイン画面消失タイムアウト")
+            
+            // リトライするか判定
+            return if (shouldRetry(GameState.CHECK_LOGIN)) {
+                logger.info(getScriptName(), "CHECK_LOGINをリトライ")
+                delay(humanizedAction.getProfile().errorRetryInterval)
+                GameState.CHECK_LOGIN
+            } else {
+                logger.error(getScriptName(), "ログイン確認失敗、終了します")
+                GameState.EXIT
+            }
+        }
     }
 
     /**
      * メインUI待機
+     * 固定delayではなく、メインメニューが出現したことをNodeFinderで確認
      */
     override suspend fun handleWaitMainUi(): GameState {
         logger.info(getScriptName(), "メインUIを待機中...")
         
-        // メインUIの検出ロジックをここに実装
-        // NodeFinderを使用してUI要素を検索
-        delay(3000)
+        // UiDriverを使用してメインメニューの出現を待機
+        val mainMenuAppeared = uiDriver.waitForMainMenu(timeoutMs = 20000)
         
-        logger.info(getScriptName(), "メインUI検出完了")
-        return GameState.TASK_LOOP
+        if (mainMenuAppeared) {
+            logger.info(getScriptName(), "メインUI検出完了")
+            return GameState.TASK_LOOP
+        } else {
+            logger.warn(getScriptName(), "メインUI待機タイムアウト")
+            
+            // リトライするか判定
+            return if (shouldRetry(GameState.WAIT_MAIN_UI)) {
+                logger.info(getScriptName(), "WAIT_MAIN_UIをリトライ")
+                delay(humanizedAction.getProfile().errorRetryInterval)
+                GameState.WAIT_MAIN_UI
+            } else {
+                logger.error(getScriptName(), "メインUI検出失敗、終了します")
+                GameState.EXIT
+            }
+        }
     }
 
     /**
