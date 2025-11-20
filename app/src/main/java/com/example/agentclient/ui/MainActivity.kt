@@ -92,13 +92,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startStatusUpdate() {
-        updateJob = scope.launch {
-            while (isActive) {
-                updateStatus()
-                delay(1000)
-            }
-        }
+         updateJob = scope.launch {
+             while (isActive) {
+                 withContext(Dispatchers.Main) {
+                     updateStatus()
+                 }
+                 delay(1000)
+             }
+         }
     }
+
 
     private fun updateStatus() {
         val accessibilityEnabled = AgentAccessibilityService.isEnabled()

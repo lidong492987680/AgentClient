@@ -1,0 +1,1 @@
+(Get-Content 'app/src/main/java/com/example/agentclient/network/HeartbeatService.kt') -replace 'CommandProcessor\(taskQueue, logger\)', 'CommandProcessor(context, logger)' | Set-Content 'app/src/main/java/com/example/agentclient/network/HeartbeatService.kt'

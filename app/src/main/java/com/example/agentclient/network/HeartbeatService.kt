@@ -26,21 +26,6 @@ import java.util.concurrent.atomic.AtomicLong
 class HeartbeatService private constructor(private val context: Context) {
 
     private val logger = Logger.getInstance(context)
-    private val config = Config.getInstance(context)
-    private val deviceIdManager = DeviceIdManager.getInstance(context)
-    private val apiClient = ApiClient.getInstance(context)
-    private val taskQueue = TaskQueue.getInstance(context)
-
-    private val handler = Handler(Looper.getMainLooper())
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-
-    // 委托对象
-    private val commandProcessor = CommandProcessor(taskQueue, logger)
-    private val deviceStatusCollector = DeviceStatusCollector(context, logger)
-
-    // 状态标志
-    private val isRunning = AtomicBoolean(false)
-    private val consecutiveFailures = AtomicInteger(0)
     private val lastHeartbeatTime = AtomicLong(0)
     private val lastSuccessTime = AtomicLong(0)
 
@@ -52,6 +37,25 @@ class HeartbeatService private constructor(private val context: Context) {
     private var currentScriptStatus: ScriptStatus? = null
     private var lastError: ErrorInfo? = null
     private var accessibilityEnabled = false
+
+    // 协程作用域
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    // Handler
+    private val handler = Handler(Looper.getMainLooper())
+
+    // 基础组件
+    private val apiClient = ApiClient.getInstance(context)
+    private val config = Config.getInstance(context)
+    private val deviceIdManager = DeviceIdManager.getInstance(context)
+    private val taskQueue = TaskQueue.getInstance(context)
+    private val commandProcessor = CommandProcessor(context, logger)
+    private val deviceStatusCollector = DeviceStatusCollector(context, logger)
+
+    // 状态变量
+    private val isRunning = AtomicBoolean(false)
+    private val consecutiveFailures = AtomicInteger(0)
+
 
     companion object {
         private const val MAX_CONSECUTIVE_FAILURES = 5

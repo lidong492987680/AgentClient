@@ -1,6 +1,7 @@
 package com.example.agentclient.core
 
 import android.app.Application
+import com.example.agentclient.scripts.engine.ScriptEngine
 
 /**
  * 应用程序入口
@@ -38,13 +39,6 @@ class AgentApplication : Application() {
 
         // 初始化配置
         val config = Config.getInstance(this)
-        if (config.get().debugMode) {
-            logger.setMinLevel(Logger.Level.DEBUG)
-        } else {
-            logger.setMinLevel(Logger.Level.INFO)
-        }
-        logger.info("Application", "AgentClient starting...")
-        logger.info("Application", "Device ID: $deviceId")
         logger.info("Application", "Configuration loaded: ${config.get().baseUrl}")
 
         // 设置调试模式
@@ -53,5 +47,13 @@ class AgentApplication : Application() {
         } else {
             logger.setMinLevel(Logger.Level.INFO)
         }
+        
+        // 初始化脚本引擎
+        ScriptEngine.initialize(applicationContext)
+        logger.info("Application", "ScriptEngine 初始化完成")
+        
+        // 初始化 UiDriver（会自动注册所有脚本）
+        UiDriver.getInstance(applicationContext)
+        logger.info("Application", "UiDriver 初始化完成，脚本已注册")
     }
 }

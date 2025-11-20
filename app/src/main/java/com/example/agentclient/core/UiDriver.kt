@@ -128,4 +128,34 @@ class UiDriver private constructor(private val context: Context) {
     fun getCurrentScriptName(): String? {
         return ScriptEngine.getCurrentScriptName()
     }
+    
+    /**
+     * 设置行为配置
+     * 切换 HumanizedAction 使用的 BehaviorProfile
+     * 
+     * @param profileName 配置名称（DEFAULT / FAST_YOUNG / SLOW_CAREFUL）
+     * @return true 如果切换成功
+     */
+    fun setBehaviorProfile(profileName: String): Boolean {
+        val profile = when (profileName.uppercase()) {
+            "DEFAULT" -> BehaviorProfile.DEFAULT
+            "FAST_YOUNG" -> BehaviorProfile.FAST_YOUNG
+            "SLOW_CAREFUL" -> BehaviorProfile.SLOW_CAREFUL
+            else -> {
+                logger.warn("UiDriver", "未知的行为配置: $profileName")
+                return false
+            }
+        }
+        
+        // 如果 HumanizedAction 还未初始化，先初始化
+        if (humanizedAction == null) {
+            humanizedAction = HumanizedAction(context, profile)
+            logger.info("UiDriver", "HumanizedAction initialized with $profileName profile")
+        } else {
+            humanizedAction!!.setProfile(profile)
+            logger.info("UiDriver", "行为配置切换为: $profileName")
+        }
+        
+        return true
+    }
 }
