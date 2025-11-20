@@ -2,31 +2,32 @@ package com.example.agentclient.scripts.engine
 
 import com.example.agentclient.core.Logger
 import com.example.agentclient.scripts.behavior.HumanizedAction
+import kotlinx.coroutines.delay
 
 /**
- * 测试脚本
- * 用于验证脚本执行链路是否正常
+ * テストスクリプト
+ * スクリプト実行チェーンが正常に動作するか検証する
  * 
- * 功能：
- * - 执行5次简单的滚动操作
- * - 每次操作之间有延迟
- * - 完成后自动停止
+ * 機能：
+ * - 5回のシンプルな待機操作を実行
+ * - 各操作間に遅延を挿入
+ * - 完了後に自動停止
  */
 class TestScript(
     humanizedAction: HumanizedAction,
     logger: Logger
 ) : BaseScript(humanizedAction, logger) {
     
-    // 步骤计数器
+    // ステップカウンター
     private var stepCount = 0
     
-    // 最大步骤数
+    // 最大ステップ数
     private val maxSteps = 5
     
     override fun getScriptName(): String = "TestScript"
     
     /**
-     * 脚本启动时调用
+     * スクリプト開始時に呼び出される
      */
     override suspend fun onStart() {
         logger.info(getScriptName(), "TestScript started")
@@ -34,25 +35,20 @@ class TestScript(
     }
     
     /**
-     * 每个步骤执行的逻辑
-     * 这里实现简单的上下滚动操作
+     * 各ステップで実行されるロジック
+     * ここでは単純な待機とログ出力を行う
      */
     override suspend fun onStep() {
         stepCount++
         logger.info(getScriptName(), "Executing step $stepCount/$maxSteps")
         
-        // 交替进行向上和向下滚动
-        val direction = if (stepCount % 2 == 0) {
-            HumanizedAction.ScrollDirection.UP
-        } else {
-            HumanizedAction.ScrollDirection.DOWN
-        }
+        // 擬人化された待機時間を挿入
+        humanizedAction.waitRandomStep()
         
-        // 执行滚动操作
-        val success = humanizedAction.scroll(direction,300f)
-        logger.debug(getScriptName(), "Scroll $direction result: $success")
+        // ステップ実行のシミュレーション
+        logger.debug(getScriptName(), "Step $stepCount completed")
         
-        // 达到最大步骤数后标记为完成
+        // 最大ステップ数に達したら完了とマーク
         if (stepCount >= maxSteps) {
             logger.info(getScriptName(), "Reached max steps, marking as finished")
             markFinished()
@@ -60,7 +56,7 @@ class TestScript(
     }
     
     /**
-     * 脚本停止时调用
+     * スクリプト停止時に呼び出される
      */
     override suspend fun onStop() {
         logger.info(getScriptName(), "TestScript finished with steps=$stepCount")
