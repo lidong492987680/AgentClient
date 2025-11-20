@@ -12,45 +12,45 @@ import kotlinx.coroutines.launch
 import java.time.LocalDate
 
 /**
- * 脚本调度引擎
- * 负责管理和执行脚本的生命周期
+ * スクリプト実行エンジン
+ * スクリプトのライフサイクル管理と実行を担当
  * 
- * 职责：
- * - 启动/停止脚本
- * - 管理脚本执行的协程
- * - 调用脚本的生命周期方法
- * - 提供脚本运行状态查询
- * - 统计每日运行时长
+ * 責務：
+ * - スクリプトの起動/停止
+ * - スクリプト実行のコルーチン管理
+ * - スクリプトのライフサイクルメソッド呼び出し
+ * - スクリプト実行状態のクエリ提供
+ * - 日次実行時間の統計
  */
 object ScriptEngine {
     
     private var context: Context? = null
     private var logger: Logger? = null
     
-    // 脚本注册表：存储脚本工厂函数
+    // スクリプト登録テーブル：スクリプトファクトリ関数を保存
     private val scriptFactories: MutableMap<String, (com.example.agentclient.scripts.behavior.HumanizedAction) -> BaseScript> = mutableMapOf()
     
-    // 当前正在运行的脚本
+    // 現在実行中のスクリプト
     private var currentScript: BaseScript? = null
     
-    // 脚本执行的协程任务
+    // スクリプト実行のコルーチンタスク
     private var scriptJob: Job? = null
     
-    // 协程作用域
+    // コルーチンスコープ
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     
-    // 当日累计运行时长（毫秒）
+    // 当日の累計実行時間（ミリ秒）
     private var dailyRuntimeMs: Long = 0L
     
-    // 运行时长统计的日期
+    // 実行時間統計の日付
     private var runtimeDate: LocalDate? = null
     
-    // 上次更新运行时长的时间戳
+    // 前回実行時間更新時のタイムスタンプ
     private var lastUpdateTime: Long = 0L
     
     /**
-     * 初始化 ScriptEngine
-     * 必须在使用前调用
+     * ScriptEngineを初期化
+     * 使用前に必ず呼び出す
      */
     fun initialize(ctx: Context) {
         context = ctx
@@ -58,38 +58,38 @@ object ScriptEngine {
     }
     
     /**
-     * 启动脚本
-     * 如果已有脚本在运行，会先停止旧脚本
+     * スクリプトを起動
+     * 既にスクリプトが実行中の場合は、古いスクリプトを先に停止する
      */
     fun startScript(script: BaseScript) {
         val log = logger ?: return
         
-        // 如果已有脚本在运行，先停止
+        // 既にスクリプトが実行中の場合は先に停止
         if (currentScript != null) {
-            log.info("ScriptEngine", "Stopping current script before starting new one")
+            log.info("ScriptEngine", "既存スクリプトを停止してから新しいスクリプトを起動")
             stopCurrentScript()
         }
         
         currentScript = script
         
-        // 启动协程执行脚本
+        // コルーチンを起動してスクリプトを実行
         scriptJob = scope.launch {
             val heartbeatService = context?.let { com.example.agentclient.network.HeartbeatService.getInstance(it) }
             val startTime = System.currentTimeMillis()
             
-            // 初始化运行时长统计
+            // 実行時間統計を初期化
             val currentDate = LocalDate.now()
             if (runtimeDate != currentDate) {
-                // 新的一天，重置计数
+                // 新しい日、カウントをリセット
                 runtimeDate = currentDate
                 dailyRuntimeMs = 0L
             }
             lastUpdateTime = System.currentTimeMillis()
             
             try {
-                log.info("ScriptEngine", "Starting script: ${script.getScriptName()}")
+                log.info("ScriptEngine", "スクリプト起動: ${script.getScriptName()}")
                 
-                // 设置错误回调
+                // エラーコールバックを設定
                 script.onError = { error ->
                     heartbeatService?.reportError("SCRIPT_ERROR", error.message)
                     heartbeatService?.updateScriptStatus(
@@ -103,7 +103,7 @@ object ScriptEngine {
                     )
                 }
                 
-                // 初始状态上报
+                // 初期状態をレポート
                 heartbeatService?.updateScriptStatus(
                     com.example.agentclient.network.HeartbeatService.ScriptStatus(
                         key = script.getScriptName(),
@@ -114,31 +114,39 @@ object ScriptEngine {
                     )
                 )
                 
-                // 调用脚本的 onStart
-                script.onStart()
+                // スクリプトのonStartを呼び出す
+                try {
+                    script.onStart()
+                } catch (e: Exception) {
+                    log.error("ScriptEngine", "onStart()でエラー発生", e)
+                    heartbeatService?.reportError("SCRIPT_START_ERROR", e.message)
+                    // onStartが失敗してもスクリプトを終了としてマーク
+                    script.markFinished()
+                }
                 
-                // 循环执行脚本步骤，直到脚本完成或被取消
+                // スクリプトが完了またはキャンセルされるまでステップをループ実行
                 while (isActive && !script.isFinished()) {
+                    // runStepSafely()内部でonStep()を呼び出し、例外をキャッチ
                     script.runStepSafely()
                     delay(script.stepIntervalMs)
                     
-                    // 更新运行时长统计
+                    // 実行時間統計を更新
                     val now = System.currentTimeMillis()
                     val nowDate = LocalDate.now()
                     
-                    // 检查是否跨天
+                    // 日付が変わったかチェック
                     if (nowDate != runtimeDate) {
-                        // 跨天了，重置统计
+                        // 日付が変わった、統計をリセット
                         runtimeDate = nowDate
                         dailyRuntimeMs = 0L
                         lastUpdateTime = now
                     } else {
-                        // 累加运行时长
+                        // 実行時間を累積
                         dailyRuntimeMs += (now - lastUpdateTime)
                         lastUpdateTime = now
                     }
                     
-                    // 更新运行状态
+                    // 実行状態を更新
                     heartbeatService?.updateScriptStatus(
                         com.example.agentclient.network.HeartbeatService.ScriptStatus(
                             key = script.getScriptName(),
@@ -150,15 +158,20 @@ object ScriptEngine {
                     )
                 }
                 
-                // 调用脚本的 onStop
-                script.onStop()
-                
-                log.info("ScriptEngine", "Script finished: ${script.getScriptName()}")
+                log.info("ScriptEngine", "スクリプト完了: ${script.getScriptName()}")
             } catch (e: Exception) {
-                log.error("ScriptEngine", "Error running script", e)
+                // 予期しないエラー（通常はキャンセルやコルーチン例外）
+                log.error("ScriptEngine", "スクリプト実行エラー", e)
                 heartbeatService?.reportError("SCRIPT_ENGINE_ERROR", e.message)
             } finally {
-                // 最终状态上报
+                // onStopを常に呼び出す（例外が発生してもクリーンアップを保証）
+                try {
+                    script.onStop()
+                } catch (e: Exception) {
+                    log.error("ScriptEngine", "onStop()でエラー発生", e)
+                }
+                
+                // 最終状態をレポート
                 heartbeatService?.updateScriptStatus(
                     com.example.agentclient.network.HeartbeatService.ScriptStatus(
                         key = script.getScriptName(),
@@ -170,7 +183,7 @@ object ScriptEngine {
                     )
                 )
                 
-                // 清理
+                // クリーンアップ
                 currentScript = null
                 scriptJob = null
             }
@@ -178,78 +191,77 @@ object ScriptEngine {
     }
     
     /**
-     * 停止当前运行的脚本
+     * 現在実行中のスクリプトを停止
      */
     fun stopCurrentScript() {
         val log = logger ?: return
+        val script = currentScript ?: return
         
-        // 标记脚本为完成状态
-        currentScript?.markFinished()
+        log.info("ScriptEngine", "スクリプトを停止中: ${script.getScriptName()}")
         
-        // 取消协程
+        // スクリプトを完了としてマーク（ループを優雅に終了させる）
+        script.markFinished()
+        
+        // コルーチンをキャンセル
         scriptJob?.cancel()
         
-        log.info("ScriptEngine", "Script stopped")
-        
-        // 清理
-        currentScript = null
-        scriptJob = null
+        // 注意：currentScriptとscriptJobのクリーンアップはfinally{}ブロックで行われる
     }
     
     /**
-     * 检查是否有脚本正在运行
+     * スクリプトが実行中かどうかをチェック
      */
     fun isRunning(): Boolean {
         return scriptJob?.isActive == true
     }
     
     /**
-     * 注册脚本工厂
-     * 允许按名称创建和启动脚本
+     * スクリプトファクトリを登録
+     * 名前でスクリプトを作成・起動できるようにする
      * 
-     * @param name 脚本名称（唯一标识）
-     * @param factory 脚本工厂函数，接收 HumanizedAction 返回 BaseScript
+     * @param name スクリプト名（一意の識別子）
+     * @param factory スクリプトファクトリ関数、HumanizedActionを受け取りBaseScriptを返す
      */
     fun registerScript(name: String, factory: (com.example.agentclient.scripts.behavior.HumanizedAction) -> BaseScript) {
         val log = logger
         
         if (scriptFactories.containsKey(name)) {
-            log?.warn("ScriptEngine", "脚本 '$name' 已存在，将被覆盖")
+            log?.warn("ScriptEngine", "スクリプト '$name' は既に存在します、上書きされます")
         }
         
         scriptFactories[name] = factory
-        log?.info("ScriptEngine", "脚本 '$name' 注册成功")
+        log?.info("ScriptEngine", "スクリプト '$name' 登録成功")
     }
     
     /**
-     * 按名称启动脚本
-     * 从注册表中查找脚本工厂并创建实例启动
+     * 名前でスクリプトを起動
+     * 登録テーブルからスクリプトファクトリを検索してインスタンスを作成し起動
      * 
-     * @param name 脚本名称
-     * @param humanizedAction HumanizedAction 实例
-     * @return true 如果启动成功，false 如果脚本未注册
+     * @param name スクリプト名
+     * @param humanizedAction HumanizedActionインスタンス
+     * @return true 起動成功、false スクリプトが未登録
      */
     fun startScriptByName(name: String, humanizedAction: com.example.agentclient.scripts.behavior.HumanizedAction): Boolean {
         val log = logger ?: return false
         
         val factory = scriptFactories[name]
         if (factory == null) {
-            log.warn("ScriptEngine", "脚本 '$name' 未注册，无法启动")
+            log.warn("ScriptEngine", "スクリプト '$name' は未登録、起動できません")
             return false
         }
         
-        // 使用工厂创建脚本实例
+        // ファクトリを使用してスクリプトインスタンスを作成
         val script = factory(humanizedAction)
         
-        // 启动脚本
+        // スクリプトを起動
         startScript(script)
-        log.info("ScriptEngine", "通过名称启动脚本: $name")
+        log.info("ScriptEngine", "名前でスクリプトを起動: $name")
         
         return true
     }
     
     /**
-     * 获取当前运行脚本的名称
+     * 現在実行中のスクリプト名を取得
      */
     fun getCurrentScriptName(): String? {
         return currentScript?.getScriptName()
@@ -257,8 +269,8 @@ object ScriptEngine {
 }
 
 /**
- * 脚本异常类
- * 用于区分不同类型的脚本错误
+ * スクリプト例外クラス
+ * 異なるタイプのスクリプトエラーを区別するために使用
  */
 class ScriptException(
     message: String,
@@ -267,8 +279,8 @@ class ScriptException(
 ) : Exception(message, cause) {
     
     enum class Type {
-        RECOVERABLE,  // 可恢复的错误
-        FATAL,        // 致命错误
-        TIMEOUT       // 超时错误
+        RECOVERABLE,  // 回復可能なエラー
+        FATAL,        // 致命的なエラー
+        TIMEOUT       // タイムアウトエラー
     }
 }
